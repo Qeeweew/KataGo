@@ -83,3 +83,4 @@ for_release/
 
 tests/results/matchsgfs/
 tests/results/matchsgfs2/
+cpp/.cache

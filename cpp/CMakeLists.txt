@@ -93,6 +93,7 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
     neuralnet/openclkernels.cpp
     neuralnet/openclhelpers.cpp
     neuralnet/opencltuner.cpp
+    neuralnet/opencl_onednn.cpp
     )
 elseif(USE_BACKEND STREQUAL "EIGEN")
   message(STATUS "-DUSE_BACKEND=EIGEN, using Eigen CPU backend.")
@@ -321,6 +322,8 @@ elseif(USE_BACKEND STREQUAL "TENSORRT")
 elseif(USE_BACKEND STREQUAL "OPENCL")
   target_compile_definitions(katago PRIVATE USE_OPENCL_BACKEND)
   find_package(OpenCL)
+  find_package(dnnl 3.8.0 CONFIG REQUIRED)
+
   if(NOT OpenCL_FOUND)
     message(WARNING "OpenCL not found, attempting to see if CUDA exists and has OpenCL since sometimes CUDA may provide OpenCL where cmake can't find it.")
     find_package(CUDAToolkit)
@@ -335,7 +338,7 @@ elseif(USE_BACKEND STREQUAL "OPENCL")
   else()
     include_directories(${OpenCL_INCLUDE_DIRS})
     link_directories(${OpenCL_LIBRARY})
-    target_link_libraries(katago ${OpenCL_LIBRARY})
+    target_link_libraries(katago ${OpenCL_LIBRARY} DNNL::dnnl)
   endif()
 elseif(USE_BACKEND STREQUAL "EIGEN")
   target_compile_definitions(katago PRIVATE USE_EIGEN_BACKEND)

@@ -11,6 +11,7 @@
 #include "../neuralnet/activations.h"
 
 #include "../neuralnet/openclhelpers.h"
+#include "../neuralnet/opencl_onednn.h"
 
 #include "../core/simpleallocator.h"
 #include "../core/test.h"
@@ -1210,27 +1211,34 @@ struct ConvLayer {
 
         cl_int err;
         MAYBE_EVENT;
-        if(handle->usingFP16TensorCores) {
-          err = doBatchedHGemmWmma_KM_KN_NM(
-            handle->xgemmBatchedNNKernel,
-            handle->commandQueue,
-            handle->tuneParams,
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-            convWorkspace, filter, convWorkspace2,
-            inTileXYSize,
-            MAYBE_EVENTREF
-          );
-        }
-        else {
-          err = doBatchedXGemm_KM_KN_NM(
-            handle->xgemmBatchedNNKernel,
-            handle->commandQueue,
-            handle->usingFP16Compute ? handle->tuneParams.xGemm16 : handle->tuneParams.xGemm,
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-            convWorkspace, filter, convWorkspace2,
-            inTileXYSize,
-            MAYBE_EVENTREF
-          );
+        // if(handle->usingFP16TensorCores) {
+        //   err = doBatchedHGemmWmma_KM_KN_NM(
+        //     handle->xgemmBatchedNNKernel,
+        //     handle->commandQueue,
+        //     handle->tuneParams,
+        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
+        //     convWorkspace, filter, convWorkspace2,
+        //     inTileXYSize,
+        //     MAYBE_EVENTREF
+        //   );
+        // }
+        // else {
+        //   err = doBatchedXGemm_KM_KN_NM(
+        //     handle->xgemmBatchedNNKernel,
+        //     handle->commandQueue,
+        //     handle->usingFP16Compute ? handle->tuneParams.xGemm16 : handle->tuneParams.xGemm,
+        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
+        //     convWorkspace, filter, convWorkspace2,
+        //     inTileXYSize,
+        //     MAYBE_EVENTREF
+        //   );
+        // }
+        if (handle->usingFP16Compute) {
+          err = OneDNNHelpers::doBatchedXGemm<true, false, true, true>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
+            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
+        }  else {
+          err = OneDNNHelpers::doBatchedXGemm<true, false, true, false>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
+            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
         }
         CHECK_ERR(err);
         if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3"); }
@@ -1354,27 +1362,34 @@ struct ConvLayer {
 
         cl_int err;
         MAYBE_EVENT;
-        if(handle->usingFP16TensorCores) {
-          err = doBatchedHGemmWmma_KM_KN_NM(
-            handle->xgemmBatchedNNKernel,
-            handle->commandQueue,
-            handle->tuneParams,
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-            convWorkspace, filter, convWorkspace2,
-            inTileXYSize,
-            MAYBE_EVENTREF
-          );
-        }
-        else {
-          err = doBatchedXGemm_KM_KN_NM(
-            handle->xgemmBatchedNNKernel,
-            handle->commandQueue,
-            handle->usingFP16Compute ? handle->tuneParams.xGemm16 : handle->tuneParams.xGemm,
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-            convWorkspace, filter, convWorkspace2,
-            inTileXYSize,
-            MAYBE_EVENTREF
-          );
+        // if(handle->usingFP16TensorCores) {
+        //   err = doBatchedHGemmWmma_KM_KN_NM(
+        //     handle->xgemmBatchedNNKernel,
+        //     handle->commandQueue,
+        //     handle->tuneParams,
+        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
+        //     convWorkspace, filter, convWorkspace2,
+        //     inTileXYSize,
+        //     MAYBE_EVENTREF
+        //   );
+        // }
+        // else {
+        //   err = doBatchedXGemm_KM_KN_NM(
+        //     handle->xgemmBatchedNNKernel,
+        //     handle->commandQueue,
+        //     handle->usingFP16Compute ? handle->tuneParams.xGemm16 : handle->tuneParams.xGemm,
+        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
+        //     convWorkspace, filter, convWorkspace2,
+        //     inTileXYSize,
+        //     MAYBE_EVENTREF
+        //   );
+        // }
+        if (handle->usingFP16Compute) {
+          err = OneDNNHelpers::doBatchedXGemm<true, false, true, true>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
+            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
+        }  else {
+          err = OneDNNHelpers::doBatchedXGemm<true, false, true, false>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
+            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
         }
         CHECK_ERR(err);
         if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3BNACT"); }
