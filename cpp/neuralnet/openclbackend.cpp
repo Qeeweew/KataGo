@@ -1150,18 +1150,25 @@ struct ConvLayer {
         int outputStride = nnXLen*nnYLen * outChannels;
         cl_int err;
         MAYBE_EVENT;
-        err = doStridedBatchedXGemmDirect_KM_KN_NM(
-          handle->xgemmDirectStridedBatchedNNKernel,
-          handle->commandQueue,
-          handle->tuneParams,
-          nnXLen*nnYLen, outChannels, inChannels,
-          inputStride, filterStride, outputStride,
-          input, filter, output,
-          batchSize,
-          MAYBE_EVENTREF
-        );
+        // err = doStridedBatchedXGemmDirect_KM_KN_NM(
+        //   handle->xgemmDirectStridedBatchedNNKernel,
+        //   handle->commandQueue,
+        //   handle->tuneParams,
+        //   nnXLen*nnYLen, outChannels, inChannels,
+        //   inputStride, filterStride, outputStride,
+        //   input, filter, output,
+        //   batchSize,
+        //   MAYBE_EVENTREF
+        // );
+        if (handle->usingFP16Compute) {
+          err = OneDNNHelpers::doBatchedXGemm1x1Conv<true>(handle->commandQueue, input, filter, output,
+            nnXLen*nnYLen, outChannels, inChannels, batchSize, MAYBE_EVENTREF);
+        } else {
+          err = OneDNNHelpers::doBatchedXGemm1x1Conv<false>(handle->commandQueue, input, filter, output, 
+            nnXLen*nnYLen, outChannels, inChannels, batchSize, MAYBE_EVENTREF);
+        }
         CHECK_ERR(err);
-        MAYBE_PROFILE("MATMULCONV1x1");
+        // MAYBE_PROFILE("MATMULCONV1x1");
         MAYBE_FREE_EVENT;
       }
       else {
@@ -1236,13 +1243,13 @@ struct ConvLayer {
         if (handle->usingFP16Compute) {
           err = OneDNNHelpers::doBatchedXGemm<true, false, true, true>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
             numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
-        }  else {
+        } else {
           err = OneDNNHelpers::doBatchedXGemm<true, false, true, false>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
             numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
         }
         CHECK_ERR(err);
-        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3"); }
-        else { MAYBE_PROFILE("MATMULCONV5x5"); }
+        // if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3"); }
+        // else { MAYBE_PROFILE("MATMULCONV5x5"); }
         MAYBE_FREE_EVENT;
       }
 
@@ -1387,13 +1394,13 @@ struct ConvLayer {
         if (handle->usingFP16Compute) {
           err = OneDNNHelpers::doBatchedXGemm<true, false, true, true>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
             numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
-        }  else {
+        } else {
           err = OneDNNHelpers::doBatchedXGemm<true, false, true, false>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
             numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
         }
         CHECK_ERR(err);
-        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3BNACT"); }
-        else { MAYBE_PROFILE("MATMULCONV5x5BNACT"); }
+        // if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3BNACT"); }
+        // else { MAYBE_PROFILE("MATMULCONV5x5BNACT"); }
         MAYBE_FREE_EVENT;
       }
 
