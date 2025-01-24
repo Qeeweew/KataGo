@@ -1142,24 +1142,109 @@ struct ConvLayer {
       );
   }
 
+  void applyWinogradConv(
+    ComputeHandleInternal* handle,
+    int batchSize,
+    cl_mem input,
+    cl_mem output,
+    cl_mem convWorkspace,
+    cl_mem convWorkspace2,
+    const BatchNormLayer* bnLayer,
+    cl_mem mask,
+    bool withBN,
+    cl_kernel transformKernel,
+    cl_kernel untransformKernel,
+    const char* profileTransformTag,
+    const char* profileUntransformTag
+  ) const {
+    // Common Winograd transform + matmul + untransform flow
+    {
+      cl_int err;
+      MAYBE_EVENT;
+      if(withBN) {
+        err = doWinogradTransformWithBNAct(
+          transformKernel,
+          handle->commandQueue,
+          handle->tuneParams,
+          input, convWorkspace,
+          bnLayer->mergedScaleBuf,
+          bnLayer->mergedBiasBuf,
+          mask,
+          nnXLen, nnYLen,
+          batchSize, numTilesX, numTilesY, handle->getXGemmMPaddingMult(),
+          inChannels, handle->getXGemmKPaddingMult(),
+          convXSize,
+          MAYBE_EVENTREF
+        );
+      } else {
+        err = doWinogradTransform(
+          transformKernel,
+          handle->commandQueue,
+          handle->tuneParams,
+          input, convWorkspace,
+          nnXLen, nnYLen,
+          batchSize, numTilesX, numTilesY, handle->getXGemmMPaddingMult(),
+          inChannels, handle->getXGemmKPaddingMult(),
+          convXSize,
+          MAYBE_EVENTREF
+        );
+      }
+      CHECK_ERR(err);
+      MAYBE_PROFILE(profileTransformTag);
+      MAYBE_FREE_EVENT;
+    }
+
+    // Common matrix multiplication
+    {
+      int numTilesTotalPadded = roundUpToMultipleInt(batchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult());
+      int outChannelsPadded = roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
+      int inChannelsPadded = roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
+
+      cl_int err;
+      MAYBE_EVENT;
+      if (handle->usingFP16Compute) {
+        err = OneDNNHelpers::doBatchedXGemm3x3or5x5Conv<true>(
+          handle->commandQueue, convWorkspace, filter, convWorkspace2, 
+          numTilesTotalPadded, outChannelsPadded, inChannelsPadded, inTileXYSize, MAYBE_EVENTREF
+        );
+      } else {
+        err = OneDNNHelpers::doBatchedXGemm3x3or5x5Conv<false>(
+          handle->commandQueue, convWorkspace, filter, convWorkspace2, 
+          numTilesTotalPadded, outChannelsPadded, inChannelsPadded, inTileXYSize, MAYBE_EVENTREF
+        );
+      }
+      // if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3"); }
+      // else { MAYBE_PROFILE("MATMULCONV5x5"); }
+      CHECK_ERR(err);
+      MAYBE_FREE_EVENT;
+    }
+
+    // Common Winograd untransform
+    {
+      cl_int err;
+      MAYBE_EVENT;
+      err = doWinogradUntransform(
+        untransformKernel,
+        handle->commandQueue,
+        handle->tuneParams,
+        convWorkspace2, output,
+        nnXLen, nnYLen,
+        batchSize, numTilesX, numTilesY, handle->getXGemmMPaddingMult(),
+        outChannels, handle->getXGemmNPaddingMult(),
+        convXSize,
+        MAYBE_EVENTREF
+      );
+      CHECK_ERR(err);
+      MAYBE_PROFILE(profileUntransformTag);
+      MAYBE_FREE_EVENT;
+    }
+  }
+
   void apply(ComputeHandleInternal* handle, int batchSize, cl_mem input, cl_mem output, cl_mem convWorkspace, cl_mem convWorkspace2) const {
     if(convXSize == 1 && convYSize == 1) {
       if(!usingHGemmWmmaNHCW) {
-        int filterStride = 0; //Reuse same filter for all matrices in batch
-        int inputStride = nnXLen*nnYLen * inChannels;
-        int outputStride = nnXLen*nnYLen * outChannels;
         cl_int err;
         MAYBE_EVENT;
-        // err = doStridedBatchedXGemmDirect_KM_KN_NM(
-        //   handle->xgemmDirectStridedBatchedNNKernel,
-        //   handle->commandQueue,
-        //   handle->tuneParams,
-        //   nnXLen*nnYLen, outChannels, inChannels,
-        //   inputStride, filterStride, outputStride,
-        //   input, filter, output,
-        //   batchSize,
-        //   MAYBE_EVENTREF
-        // );
         if (handle->usingFP16Compute) {
           err = OneDNNHelpers::doBatchedXGemm1x1Conv<true>(handle->commandQueue, input, filter, output,
             nnXLen*nnYLen, outChannels, inChannels, batchSize, MAYBE_EVENTREF);
@@ -1188,93 +1273,19 @@ struct ConvLayer {
       }
     }
     else if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
-
-      {
-        cl_int err;
-        MAYBE_EVENT;
-        err = doWinogradTransform(
-          (convXSize == 3 && convYSize == 3) ?
-          handle->winogradConv3x3NCHWTransformKernel :
-          handle->winogradConv5x5NCHWTransformKernel,
-          handle->commandQueue,
-          handle->tuneParams,
-          input,convWorkspace,
-          nnXLen,nnYLen,
-          batchSize,numTilesX,numTilesY,handle->getXGemmMPaddingMult(), //M in gemm
-          inChannels,handle->getXGemmKPaddingMult(),                    //K in gemm
-          convXSize,
-          MAYBE_EVENTREF
-        );
-        CHECK_ERR(err);
-        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("3x3TRANSFORM"); }
-        else { MAYBE_PROFILE("5x5TRANSFORM"); }
-        MAYBE_FREE_EVENT;
-      }
-
-      {
-        int numTilesTotalPadded = roundUpToMultipleInt(batchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult());
-        int outChannelsPadded = roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-        int inChannelsPadded = roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
-
-        cl_int err;
-        MAYBE_EVENT;
-        // if(handle->usingFP16TensorCores) {
-        //   err = doBatchedHGemmWmma_KM_KN_NM(
-        //     handle->xgemmBatchedNNKernel,
-        //     handle->commandQueue,
-        //     handle->tuneParams,
-        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-        //     convWorkspace, filter, convWorkspace2,
-        //     inTileXYSize,
-        //     MAYBE_EVENTREF
-        //   );
-        // }
-        // else {
-        //   err = doBatchedXGemm_KM_KN_NM(
-        //     handle->xgemmBatchedNNKernel,
-        //     handle->commandQueue,
-        //     handle->usingFP16Compute ? handle->tuneParams.xGemm16 : handle->tuneParams.xGemm,
-        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-        //     convWorkspace, filter, convWorkspace2,
-        //     inTileXYSize,
-        //     MAYBE_EVENTREF
-        //   );
-        // }
-        if (handle->usingFP16Compute) {
-          err = OneDNNHelpers::doBatchedXGemm<true, false, true, true>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
-        } else {
-          err = OneDNNHelpers::doBatchedXGemm<true, false, true, false>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
-        }
-        CHECK_ERR(err);
-        // if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3"); }
-        // else { MAYBE_PROFILE("MATMULCONV5x5"); }
-        MAYBE_FREE_EVENT;
-      }
-
-      {
-        cl_int err;
-        MAYBE_EVENT;
-        err = doWinogradUntransform(
-          (convXSize == 3 && convYSize == 3) ?
-          handle->winogradConv3x3NCHWUntransformKernel :
-          handle->winogradConv5x5NCHWUntransformKernel,
-          handle->commandQueue,
-          handle->tuneParams,
-          convWorkspace2,output,
-          nnXLen,nnYLen,
-          batchSize,numTilesX,numTilesY,handle->getXGemmMPaddingMult(), //M in gemm
-          outChannels,handle->getXGemmNPaddingMult(),                   //N in gemm
-          convXSize,
-          MAYBE_EVENTREF
-        );
-        CHECK_ERR(err);
-        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("3x3UNTRANSFORM"); }
-        else { MAYBE_PROFILE("5x5UNTRANSFORM"); }
-        MAYBE_FREE_EVENT;
-      }
-
+      cl_kernel transformKernel = (convXSize == 3) ? 
+        handle->winogradConv3x3NCHWTransformKernel : 
+        handle->winogradConv5x5NCHWTransformKernel;
+      cl_kernel untransformKernel = (convXSize == 3) ? 
+        handle->winogradConv3x3NCHWUntransformKernel : 
+        handle->winogradConv5x5NCHWUntransformKernel;
+      applyWinogradConv(
+        handle, batchSize, input, output, convWorkspace, convWorkspace2,
+        nullptr, nullptr, false,  // 无BN参数
+        transformKernel, untransformKernel,
+        (convXSize == 3) ? "3x3TRANSFORM" : "5x5TRANSFORM",
+        (convXSize == 3) ? "3x3UNTRANSFORM" : "5x5UNTRANSFORM"
+      );
     }
 
     else {
@@ -1310,12 +1321,18 @@ struct ConvLayer {
       globalSizes[0] = roundUpToMultiple(nnXLen,TILE_XSIZE);
       globalSizes[1] = roundUpToMultiple(nnYLen,TILE_YSIZE);
       globalSizes[2] = outChannels;
-
       cl_int err;
       MAYBE_EVENT;
       err = clEnqueueNDRangeKernel(
         handle->commandQueue, kernel, nKernelDims, NULL, globalSizes, localSizes, 0, NULL, MAYBE_EVENTREF
       );
+      /*
+      if (handle->usingFP16Compute) {
+        err = OneDNNHelpers::conv2dNCHW<true>(handle->commandQueue, input, filter, output, batchSize, inChannels, outChannels, nnYLen, nnXLen, convXRadius, convYRadius, MAYBE_EVENTREF);
+      } else {
+        err = OneDNNHelpers::conv2dNCHW<false>(handle->commandQueue, input, filter, output, batchSize, inChannels, outChannels, nnYLen, nnXLen, convXRadius, convYRadius, MAYBE_EVENTREF);
+      }
+      */
       CHECK_ERR(err);
       if(convXRadius == 2 && convYRadius == 2) {
         MAYBE_PROFILE("CONV5");
@@ -1336,99 +1353,32 @@ struct ConvLayer {
     cl_mem input, cl_mem output, cl_mem mask, cl_mem convWorkspace, cl_mem convWorkspace2
   ) const {
     if((convXSize == 3 && convYSize == 3) || (convXSize == 5 && convYSize == 5)) {
-      {
-        assert(bnLayer->activation == ACTIVATION_RELU || bnLayer->activation == ACTIVATION_MISH);
-        cl_int err;
-        MAYBE_EVENT;
-        err = doWinogradTransformWithBNAct(
-          (convXSize == 3 && convYSize == 3) ?
-          (bnLayer->activation == ACTIVATION_RELU ? handle->winogradConv3x3NCHWBNReluTransformKernel : handle->winogradConv3x3NCHWBNMishTransformKernel) :
-          (bnLayer->activation == ACTIVATION_RELU ? handle->winogradConv5x5NCHWBNReluTransformKernel : handle->winogradConv5x5NCHWBNMishTransformKernel),
-          handle->commandQueue,
-          handle->tuneParams,
-          input,convWorkspace,
-          bnLayer->mergedScaleBuf,
-          bnLayer->mergedBiasBuf,
-          mask,
-          nnXLen,nnYLen,
-          batchSize,numTilesX,numTilesY,handle->getXGemmMPaddingMult(), //M in gemm
-          inChannels,handle->getXGemmKPaddingMult(),                    //K in gemm
-          convXSize,
-          MAYBE_EVENTREF
-        );
-        CHECK_ERR(err);
-        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("3x3TRANSFORMBNACT"); }
-        else { MAYBE_PROFILE("5x5TRANSFORMBNACT"); }
-        MAYBE_FREE_EVENT;
+      cl_kernel transformKernel;
+      cl_kernel untransformKernel = (convXSize == 3) ? 
+        handle->winogradConv3x3NCHWUntransformKernel : 
+        handle->winogradConv5x5NCHWUntransformKernel;
+
+      // 根据激活类型选择kernel
+      if(convXSize == 3) {
+        transformKernel = (bnLayer->activation == ACTIVATION_RELU) ?
+          handle->winogradConv3x3NCHWBNReluTransformKernel :
+          handle->winogradConv3x3NCHWBNMishTransformKernel;
+      } else {
+        transformKernel = (bnLayer->activation == ACTIVATION_RELU) ?
+          handle->winogradConv5x5NCHWBNReluTransformKernel :
+          handle->winogradConv5x5NCHWBNMishTransformKernel;
       }
 
-      {
-        int numTilesTotalPadded = roundUpToMultipleInt(batchSize * numTilesX * numTilesY, handle->getXGemmMPaddingMult());
-        int outChannelsPadded = roundUpToMultipleInt(outChannels, handle->getXGemmNPaddingMult());
-        int inChannelsPadded = roundUpToMultipleInt(inChannels, handle->getXGemmKPaddingMult());
-
-        cl_int err;
-        MAYBE_EVENT;
-        // if(handle->usingFP16TensorCores) {
-        //   err = doBatchedHGemmWmma_KM_KN_NM(
-        //     handle->xgemmBatchedNNKernel,
-        //     handle->commandQueue,
-        //     handle->tuneParams,
-        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-        //     convWorkspace, filter, convWorkspace2,
-        //     inTileXYSize,
-        //     MAYBE_EVENTREF
-        //   );
-        // }
-        // else {
-        //   err = doBatchedXGemm_KM_KN_NM(
-        //     handle->xgemmBatchedNNKernel,
-        //     handle->commandQueue,
-        //     handle->usingFP16Compute ? handle->tuneParams.xGemm16 : handle->tuneParams.xGemm,
-        //     numTilesTotalPadded, outChannelsPadded, inChannelsPadded,
-        //     convWorkspace, filter, convWorkspace2,
-        //     inTileXYSize,
-        //     MAYBE_EVENTREF
-        //   );
-        // }
-        if (handle->usingFP16Compute) {
-          err = OneDNNHelpers::doBatchedXGemm<true, false, true, true>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
-        } else {
-          err = OneDNNHelpers::doBatchedXGemm<true, false, true, false>(handle->commandQueue, convWorkspace, filter, convWorkspace2, 
-            numTilesTotalPadded, outChannelsPadded, inChannelsPadded,inTileXYSize, MAYBE_EVENTREF);
-        }
-        CHECK_ERR(err);
-        // if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("MATMULCONV3x3BNACT"); }
-        // else { MAYBE_PROFILE("MATMULCONV5x5BNACT"); }
-        MAYBE_FREE_EVENT;
-      }
-
-      {
-        cl_int err;
-        MAYBE_EVENT;
-        err = doWinogradUntransform(
-          (convXSize == 3 && convYSize == 3) ?
-          handle->winogradConv3x3NCHWUntransformKernel :
-          handle->winogradConv5x5NCHWUntransformKernel,
-          handle->commandQueue,
-          handle->tuneParams,
-          convWorkspace2,output,
-          nnXLen,nnYLen,
-          batchSize,numTilesX,numTilesY,handle->getXGemmMPaddingMult(), //M in gemm
-          outChannels,handle->getXGemmNPaddingMult(),                   //N in gemm
-          convXSize,
-          MAYBE_EVENTREF
-        );
-        CHECK_ERR(err);
-        if(convXSize == 3 && convYSize == 3) { MAYBE_PROFILE("3x3UNTRANSFORMBNACT"); }
-        else { MAYBE_PROFILE("5x5UNTRANSFORMBNACT"); }
-        MAYBE_FREE_EVENT;
-      }
-
+      applyWinogradConv(
+        handle, batchSize, input, output, convWorkspace, convWorkspace2,
+        bnLayer, mask, true,  // 带BN参数
+        transformKernel, untransformKernel,
+        (convXSize == 3) ? "3x3TRANSFORMBNACT" : "5x5TRANSFORMBNACT",
+        (convXSize == 3) ? "3x3UNTRANSFORMBNACT" : "5x5UNTRANSFORMBNACT"
+      );
     }
     else {
-      throw StringError("Attempted ConvLayer::applyWithBNAct on non-3x3 or non-5x5 conv, implementation dues not currently support this");
+      throw StringError("ConvLayer::applyWithBNAct on unsupported conv size");
     }
   }
 
